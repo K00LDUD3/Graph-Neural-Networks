@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 
 class GraphConvolution(nn.Module):
     def __init__(self, in_features, out_features, activation=None, bias:bool = True) -> None:
@@ -42,3 +42,30 @@ class GraphConvolution(nn.Module):
             out = self.activation(out)
 
         return out
+
+
+
+class KarateClubGNN(nn.Module):
+    def __init__(self, num_features, hidden_dim, num_classes, dropout_rate=0.5):
+        super().__init__()
+
+        self.conv1 = GraphConvolution(
+            in_features=num_features,
+            out_features=hidden_dim,
+            activation=nn.ReLU()
+        )
+
+        self.conv2 = GraphConvolution(
+            in_features=hidden_dim,
+            out_features=num_classes,
+            activation=None
+        )
+
+        self.dropout = nn.Dropout(dropout_rate)
+
+    def forward(self, X, A_norm):
+        h = self.conv1(X, A_norm)
+        h = self.dropout(h)
+        logits = self.conv2(h, A_norm)
+
+        return logits

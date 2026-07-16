@@ -1,15 +1,14 @@
 import torch
+import torch.nn as nn
 import networkx as nx
 from exprim import anchor, echo
+from arch import KarateClubGNN
 
 
-
-#_: assembling config
-from config import DeviceConfig
-from dataclasses import dataclass, field
-#@dataclass(frozen=True)
-#class Config(anchor.BaseConfig):
-#    device: Device = field(default_factory=Device)
+#_: instantiating config
+from config import mainCFG
+from dataclasses import dataclass
+cfg = mainCFG()
 
 #_: dataset loader
 def load_karate_club(logger: echo.Logger | None = None):
@@ -27,10 +26,10 @@ def load_karate_club(logger: echo.Logger | None = None):
         targets.extend([v, u])
 
     #_: [2, 2 * num_edges] -> [2, 156] for faster indexing
-    edge_index = torch.tensor([sources,targets], dtype=torch.long, device = DeviceConfig.cuda)
+    edge_index = torch.tensor([sources,targets], dtype=torch.long, device =cfg.device)
     
     #_: 34x34 identity matrix
-    X = torch.eye(num_nodes, dtype=torch.float32, device=DeviceConfig.cuda)
+    X = torch.eye(num_nodes, dtype=torch.float32, device=cfg.device)
     
     #_: label index mapping
     communities = [G.nodes[i]['club'] for i in range(num_nodes)]
@@ -44,7 +43,7 @@ def load_karate_club(logger: echo.Logger | None = None):
     
     label_map = {club: idx for idx,club in enumerate(unique_clubs)}
 
-    Y = torch.tensor([label_map[club] for club in communities], dtype=torch.long, device=DeviceConfig.cuda)
+    Y = torch.tensor([label_map[club] for club in communities], dtype=torch.long, device=cfg.device)
 
     if logger:
         logger.info(f"feature shape(X): {X.shape}")
@@ -93,10 +92,40 @@ def preprocess(logger: echo.Logger | None = None):
     edge_index_sl = add_self_loops(edge_index, num_nodes)
     edge_norm_coefficients = compute_symmetric_normalization(edge_index_sl, num_nodes)
     
-    A_norm_space = torch.sparse_coo_tensor(edge_index_sl, edge_norm_coefficients, (num_nodes, num_nodes), device=DeviceConfig.cuda)
+    A_norm_space = torch.sparse_coo_tensor(edge_index_sl, edge_norm_coefficients, (num_nodes, num_nodes), device=cfg.device)
 
     return X, Y, num_nodes, edge_index_sl, A_norm_space
 
+def train(model: nn.Module, optimizer: torch.optim.Optimizer, criterion, A_norm_sparse, X, Y, num_nodes,
+          logger: echo.Logger):
+
+    X.to(cfg.device)
+    Y.to(cfg.device)
+    A_norm_sparse.to(cfg.device)
+    model.to(cfg.device)
+
+    for epoch in range(cfg.arch.gnn.epochs):
+        model.train()
+        optimizer.zero_grad()
+
+        logits = model(X, A_norm_sparse)
+        loss = criterion(logits, Y)
+        loss.backward()
+        optimizer.step()
+
+        if epoch % 20 == 0:
+            model.eval()
+            
+            with torch.no_grad():
+                eval_logits = model(X, A_norm_sparse)
+            
+                predictions = eval_logits.argmax(dim=1)
+                correct = (predictions == Y).sum().item()
+                accuracy = correct / num_nodes
+            
+            logger.metric("accuracy", accuracy, step=epoch)
+    
+    logger.info("Done training")
 
 def main():
     #_: Echo Logger
@@ -105,7 +134,12 @@ def main():
     #_: sparse tensor A_norm
     X, Y, num_nodes, edge_index_sl, A_norm_sparse = preprocess(logger)
     
-    print(A_norm_sparse)
+    model = KarateClubGNN(cfg.dataset.num_features, cfg.arch.gnn.hidden_dim, cfg.dataset.num_classes)
+    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.arch.optim.lr, weight_decay=cfg.arch.optim.weight_decay)
+    criterion = nn.CrossEntropyLoss()
+    
+    train(model, optimizer, criterion, A_norm_sparse, X, Y, num_nodes, logger)
+
    
 
 if __name__ == "__main__":
